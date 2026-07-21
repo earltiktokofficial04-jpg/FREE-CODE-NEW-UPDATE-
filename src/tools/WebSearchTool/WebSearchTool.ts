@@ -254,21 +254,62 @@ export const WebSearchTool = buildTool({
 
     const formBody = new URLSearchParams({ q: query }).toString()
 
-    const response = await fetch('https://lite.duckduckgo.com/lite/', {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: formBody,
-      signal: context.abortController.signal,
-    })
+    // Wrap entire search in try/catch so failures surface in output
+    // (instead of throwing — which would just kill the tool call silently)
+    let html = ''
+    let fetchError = ''
+    let attempts = 0
+    const maxAttempts = 2
+    while (attempts < maxAttempts) {
+      attempts++
+      try {
+        const response = await fetch('https://lite.duckduckgo.com/lite/', {
+          method: 'POST',
+          headers: {
+            ...headers,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: formBody,
+          // NOTE: do NOT pass context.abortController.signal here — in sandboxed
+          // environments the framework abort can fire too early and cancel the
+          // fetch before results come back. fetch already has its own timeout.
+        })
 
-    if (!response.ok) {
-      throw new Error(`DuckDuckGo returned HTTP ${response.status}`)
+        if (!response.ok) {
+          fetchError = `DuckDuckGo returned HTTP ${response.status}`
+          continue
+        }
+
+        html = await response.text()
+        if (html && html.length > 500) {
+          fetchError = ''
+          break
+        }
+        fetchError = `Empty response (${html.length} bytes)`
+      } catch (e) {
+        fetchError = `Fetch failed: ${e?.message ?? String(e)}`
+        // small backoff before retry
+        await new Promise((r) => setTimeout(r, 300))
+      }
     }
 
-    const html = await response.text()
+    if (!html) {
+      const endTime = performance.now()
+      const durationSeconds = (endTime - startTime) / 1000
+      return {
+        data: {
+          query,
+          results: [
+            {
+              tool_use_id: toolUseId,
+              content: [],
+            },
+            `❌ DuckDuckGo gagal dihubungi selepas ${maxAttempts} percubaan. Ralat: ${fetchError}\n\nCuba lagi dengan query lain, atau periksa sambungan internet.`,
+          ],
+          durationSeconds,
+        },
+      }
+    }
 
     // Strip HTML tags + decode common entities (no DOM, just regex)
     const decodeEntities = (s) =>
